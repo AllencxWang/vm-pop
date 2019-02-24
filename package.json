@@ -1,0 +1,13 @@
+{
+  "name": "vm-pop",
+  "version": "1.0.0",
+  "main": "index.js",
+  "author": "Allen Wang <sixesrai3@gmail.com>",
+  "license": "MIT",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "puppeteer": "^1.12.2"
+  }
+}
