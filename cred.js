@@ -2,5 +2,6 @@ module.exports = {
   username: '',
   password: '',
   homepage: '',
-  course: '',
+  courseUrl: '',
+  courseName: ''
 };
