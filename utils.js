@@ -1,0 +1,1 @@
+exports.esc = (str) => str.replace(/ /g, '\\ ');

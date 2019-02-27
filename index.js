@@ -3,6 +3,8 @@ const path = require('path');
 const fs = require('fs');
 const writeJsonFile = require('write-json-file');
 const loadJsonFile = require('load-json-file');
+const pexec = require('./pexec');
+const esc = require('./utils').esc;
 
 const cred = require('./cred');
 const pmkdirp = require('./pmkdirp');
@@ -92,13 +94,31 @@ const jsonFile = path.join(__dirname, `file-list/${cred.courseName}.json`);
 
     for (let lesson in lessonTable) {
       const types = ['audio', 'video'];
+      const mergedFiles = [];
+      const lessonDirectory = path.join(baseDirectory, lesson)
       for (let type of types) {
-        let directory = path.join(baseDirectory, lesson, type);
+        let directory = path.join(lessonDirectory, type);
         await pmkdirp(directory);
+        const files = [];
         for (let link of lessonTable[lesson][type]) {
-          await download(link.url, path.join(directory, link.file));
+          const file = path.join(directory, link.file);
+          await download(link.url, file);
+          files.push(esc(file));
         }
+
+        // merge video/audio chunks
+        const mergedFile = path.join(lessonDirectory, `${type}.m4s`);
+        const cmd = `cat ${files.join(' ')} > ${esc(mergedFile)}`;
+        await pexec(cmd);
+
+        mergedFiles.push(esc(mergedFile));
       }
+
+      // combine video with audio
+      const outputFile = esc(path.join(baseDirectory, `${lesson}.mp4`));
+      const cmd = `MP4Box -add ${mergedFiles[0]} -add ${mergedFiles[1]} -new ${outputFile}`
+      await pexec(cmd);
+      await pexec(`rm ${mergedFiles.join(' ')}`);
     }  
   })();
 })();
