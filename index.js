@@ -10,135 +10,109 @@ const cred = require('./cred');
 const pmkdirp = require('./pmkdirp');
 const download = require('./download');
 
-const baseDirectory = path.join(__dirname, 'download', cred.courseName);
-const jsonFile = path.join(__dirname, `file-list/${cred.courseName}.json`);
+const getFilesFromLink = async (link) => {
+  const courseName = link.substring(link.lastIndexOf('/') + 1, link.length);
+  const outputDirectory = path.join(__dirname, 'download', courseName);
+  const jsonFile = path.join(__dirname, `file-list/${courseName}.json`);
 
-(async () => {
   if (!fs.existsSync(jsonFile)) {
     await (async () => {
       const browser = await puppeteer.launch({
-        // devtools: true,
-        // headless: false,
-        args: ['--disable-features=site-per-process'], // for intercept iframe vimeo response
+        devtools: true,
+        headless: false,
+        args: [
+          '--disable-features=site-per-process',
+          '--enable-popup-blocking',
+        ], // for intercept iframe vimeo response
       });
       const page = await browser.newPage();
-      await page.goto(cred.homepage);
-      await page.click('#__layout > div > div > div > header > button');
-      await page.waitFor(2000);
-      await page.click(
-        '#__layout > div > div > div > header > div > nav > div.navbar-secondary.notlogged > button.button.primary.-small'
-      );
-      await page.waitFor(2000);
-      await page.type('input[type="email"]', cred.username);
+      await page.goto(link);
       await page.type('input[type="password"]', cred.password);
-      await page.click(
-        '#__layout > div > div.v--modal-overlay.scrollable > div > div.v--modal-box.v--modal > form > div.form-actions > button'
-      );
-      await page.waitFor(2000);
-      await page.goto(cred.courseUrl);
-      await page.waitFor(2000);
-      const lessons = await page.evaluate(() => {
-        const titles = Array.from(
-          document.querySelectorAll('.list-item-title')
-        );
-        return titles.map((title) => title.innerText.replace(/&/g, 'and'));
-      });
+      await page.keyboard.press('Enter');
+      await page.waitForNavigation();
 
-      const lessonTable = {};
+      const lessons = [];
 
-      for (let i = 0; i < lessons.length; i++) {
-        const lesson = lessons[i];
-        await page.click(`.list-item:nth-of-type(${i + 1})`);
-        await new Promise(async (resolve) => {
-          console.log('Lesson - ', lesson);
-          page.on('response', async (response) => {
-            let root = response.url();
-            if (root.includes('master.json')) {
-              const data = await response.json();
-              root = path.join(
-                root.substring(0, root.lastIndexOf('/')),
-                data.base_url
-              );
-
-              const audio = data.audio[0];
-              let video = null;
-
-              let highestBitrate = 0;
-              for (let v of data.video) {
-                if (v.width === 1920 && v.height === 1080) {
-                  video = v;
-                  break;
-                }
-                if (v.bitrate > highestBitrate) {
-                  highestBitrate = v.bitrate;
-                  video = v;
-                }
-                console.log('video:', v);
+      const getLessons = async () => {
+        const result = await page.evaluate(() => {
+          const next = Array.from(
+            document.querySelectorAll('a.page-link')
+          ).find((a) => a.innerText.includes('Next'));
+          return {
+            lessons: Array.from(document.querySelectorAll('a.tx-dark')).map(
+              (a) => {
+                const text = a.innerText;
+                const href = a.href;
+                const title = text.substring(
+                  text.indexOf(' ') + 1,
+                  text.length
+                );
+                const num = text
+                  .substring(0, text.indexOf('.'))
+                  .padStart(3, '0');
+                return { href, fileName: `${num} - ${title}` };
               }
-
-              const getFileLinks = (segments, baseUrl) =>
-                // 'segment-0.m4s' is actually a hidden (un-listed) file
-                [{ url: 'segment-0.m4s' }]
-                  .concat(segments)
-                  .reduce((accu, curr) => {
-                    accu.push({
-                      file: curr.url,
-                      url: path.join(baseUrl, curr.url),
-                    });
-                    return accu;
-                  }, []);
-
-              lessonTable[lesson] = {
-                audio: getFileLinks(
-                  audio.segments,
-                  path.join(root, audio.base_url)
-                ),
-                video: getFileLinks(
-                  video.segments,
-                  path.join(root, video.base_url)
-                ),
-              };
+            ),
+            nextPage: next ? next.href : '',
+          };
+        });
+        lessons.push(...result.lessons);
+        if (result.nextPage) {
+          await page.goto(result.nextPage);
+          await getLessons();
+        }
+      };
+      await getLessons();
+      browser.on('targetcreated', async (target) => {
+        const page = await target.page();
+        if (page) page.close();
+      });
+      for (let lesson of lessons) {
+        await page.goto(lesson.href);
+        await page.setRequestInterception(true);
+        const promise = new Promise(async (resolve) => {
+          page.on('request', (request) => {
+            if (
+              request.isNavigationRequest() &&
+              request.redirectChain().length !== 0
+            ) {
+              page.removeAllListeners('request');
+              page.setRequestInterception(false);
+              lesson.fileUrl = request.url();
+              console.log(courseName, lesson);
+              request.abort();
               resolve();
+            } else {
+              request.continue();
             }
           });
         });
-        page.removeAllListeners('response');
+        await page.waitForSelector('#downloadbtn');
+        await page.click('#downloadbtn');
+        await promise;
       }
+      browser.removeAllListeners('targetcreated');
       await browser.close();
-      await writeJsonFile(jsonFile, lessonTable);
+      await writeJsonFile(jsonFile, {
+        courseName,
+        lessons,
+      });
     })();
   }
 
   await (async () => {
-    const lessonTable = await loadJsonFile(jsonFile);
+    const data = await loadJsonFile(jsonFile);
+    await pmkdirp(outputDirectory);
 
-    for (let lesson in lessonTable) {
-      const types = ['audio', 'video'];
-      const mergedFiles = [];
-      const lessonDirectory = path.join(baseDirectory, lesson);
-      for (let type of types) {
-        let directory = path.join(lessonDirectory, type);
-        await pmkdirp(directory);
-        const files = [];
-        for (let link of lessonTable[lesson][type]) {
-          const file = path.join(directory, link.file);
-          await download(link.url, file);
-          files.push(esc(file));
-        }
-
-        // merge video/audio chunks
-        const mergedFile = path.join(lessonDirectory, `${type}.m4s`);
-        const cmd = `cat ${files.join(' ')} > ${esc(mergedFile)}`;
-        await pexec(cmd);
-
-        mergedFiles.push(esc(mergedFile));
-      }
-
-      // combine video with audio
-      const outputFile = esc(path.join(baseDirectory, `${lesson}.mp4`));
-      const cmd = `MP4Box -add ${mergedFiles[0]} -add ${mergedFiles[1]} -new ${outputFile}`;
-      await pexec(cmd);
-      await pexec(`rm ${mergedFiles.join(' ')}`);
+    for (let lesson of data.lessons) {
+      const file = path.join(outputDirectory, lesson.fileName);
+      await download(lesson.fileUrl, file);
     }
   })();
+};
+
+(async () => {
+  for (let link of cred.sendcmLinks) {
+    await getFilesFromLink(link);
+  }
 })();
